@@ -10,8 +10,18 @@ keyword later is a one-line edit.
 """
 
 import logging
+import random
 import re
+import time
 
+from playwright.sync_api import (
+    Browser,
+    Error as PlaywrightError,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -136,6 +146,11 @@ CATEGORY_UNKNOWN = MISSING_ELIGIBILITY
 
 PAGE_NOT_FOUND_TEXT = "sayfa bulunamadı"  # compared after turkish_lower
 
+# Internal load outcomes (control flow - not display values).
+LOAD_OK = "load_ok"
+LOAD_RETRYABLE = "load_retryable"
+LOAD_NOT_FOUND = "load_not_found"
+LOAD_FAILED = "load_failed"
 
 # ======================================================================
 # Text helpers
@@ -172,30 +187,102 @@ TURKISH_GENERIC_PATTERNS: list[re.Pattern] = compile_keywords(TURKISH_GENERIC_KE
 
 
 # ======================================================================
+# Browser core
+# ======================================================================
+
+
+def launch_browser(playwright: Playwright) -> tuple[Browser, Page]:
+    """Launch Microsoft Edge headless and return (browser, page).
+
+    The context carries the explicit User-Agent (politeness).
+    """
+    browser = playwright.chromium.launch(channel="msedge", headless=True)
+    context = browser.new_context(user_agent=USER_AGENT)
+    page = context.new_page()
+    logger.info("Edge browser launched (headless).")
+    return browser, page
+
+
+def _sleep_backoff() -> None:
+    """Sleep a random backoff interval between retry attempts."""
+    seconds = random.uniform(BACKOFF_MIN_SECONDS, BACKOFF_MAX_SECONDS)
+    logger.info("Backing off %.1f s before the next attempt.", seconds)
+    time.sleep(seconds)
+
+
+def open_page(page: Page, url: str) -> tuple[str, str]:
+    """Open a URL once - no retry. Returns (outcome, detail).
+
+    Outcomes:
+      LOAD_OK         - loaded; passed the not-found text check
+      LOAD_RETRYABLE  - transient failure (timeout / network / 5xx / 408 / 429)
+      LOAD_NOT_FOUND  - deterministic not-found (HTTP 404 or marker text)
+      LOAD_FAILED     - non-retryable error (e.g. 403)
+    """
+    timeout_ms = TIMEOUT_SECONDS * 1000  # Playwright expects milliseconds!
+    try:
+        response = page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        return LOAD_RETRYABLE, f"navigation error - {type(exc).__name__}: {exc}"
+
+    # Guard: response may be None (no HTTP status available).
+    if response is not None:
+        status = response.status
+        if status == 404:
+            return LOAD_NOT_FOUND, "HTTP 404"
+        if status >= 500 or status in RETRYABLE_STATUS_CODES:
+            return LOAD_RETRYABLE, f"HTTP {status}"
+        if 400 <= status < 500:
+            return LOAD_FAILED, f"HTTP {status} (non-retryable)"
+
+    # Status is fine (or unavailable) - soft not-found check: the site
+    # may serve the not-found page with status 200.
+    body_text = page.inner_text("body")
+    if PAGE_NOT_FOUND_TEXT in turkish_lower(body_text):
+        return LOAD_NOT_FOUND, "not-found marker in page text"
+    return LOAD_OK, "ok"
+
+
+def open_with_retry(page: Page, url: str, attempts: int = MAX_ATTEMPTS) -> tuple[str, str]:
+    """Open a URL with up to `attempts` tries and 2-5 s backoff.
+
+    Retries only LOAD_RETRYABLE outcomes; LOAD_NOT_FOUND and LOAD_FAILED
+    are deterministic and return immediately. Returns the final
+    (outcome, detail).
+    """
+    last_detail = "no attempts made"
+    for attempt in range(1, attempts + 1):
+        logger.info("Attempt %d/%d: %s", attempt, attempts, url)
+        outcome, last_detail = open_page(page, url)
+        if outcome != LOAD_RETRYABLE:
+            return outcome, last_detail
+        logger.warning("Attempt %d failed - %s", attempt, last_detail)
+        if attempt < attempts:
+            _sleep_backoff()
+    return LOAD_FAILED, f"all {attempts} attempts exhausted - last: {last_detail}"
+
+
+# ======================================================================
 # Entry point
 # ======================================================================
 
 
 def main() -> int:
-    """Phase 1 scaffold: validate configuration, compilation and logging.
-
-    Browser core, page navigation, extraction and CSV output arrive in
-    the upcoming phases - this run only proves the scaffold works.
+    """Phase 2 smoke test: launch Edge headless and load a page through
+    the retry core (example.com - the target site arrives in Phase 3).
     """
-    compiled_groups = {
-        "FOREIGNERS_ONLY": FOREIGNERS_ONLY_PATTERNS,
-        "BOTH": BOTH_PATTERNS,
-        "TURKISH_ONLY_EXCLUSIVE": TURKISH_ONLY_EXCLUSIVE_PATTERNS,
-        "TURKISH_GENERIC": TURKISH_GENERIC_PATTERNS,
-    }
-    for name, patterns in compiled_groups.items():
-        logger.info("%s: %d pattern(s) compiled", name, len(patterns))
-
-    logger.info(
-        "Deadline labels: %d | Turkish months: %d | Timeout: %ds x %d attempts",
-        len(DEADLINE_LABELS), len(TURKISH_MONTHS), TIMEOUT_SECONDS, MAX_ATTEMPTS,
-    )
-    logger.info("Phase 1 scaffold OK - browser core arrives in Phase 2.")
+    with sync_playwright() as playwright:
+        browser, page = launch_browser(playwright)
+        try:
+            outcome, detail = open_with_retry(page, "https://example.com")
+            if outcome != LOAD_OK:
+                logger.error("Unexpected outcome for example.com: %s (%s)", outcome, detail)
+                return 1
+            logger.info("Loaded example.com (%s) - title: %s", detail, page.title())
+        finally:
+            browser.close()
+            logger.info("Browser closed.")
+    logger.info("Phase 2 browser core OK - listing page arrives in Phase 3.")
     return 0
 
 
