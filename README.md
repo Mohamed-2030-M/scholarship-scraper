@@ -70,7 +70,7 @@ Before a result is trusted, the script checks that the quoted evidence and the d
 7. **Verify.** The deadline and both evidence strings must appear in the full page text (compared after normalization), and the eligibility evidence must contain a nationality keyword — otherwise the row becomes `Check`.
 8. **Save and summarize.** Rows are merged into the master CSV, `Days Left` / `Expired` are recomputed, and a summary lists every row that needs a human look.
 
-<img src="assets/PIPLEINE_DESING_System Desing_Workflow.jpg" alt="Pipeline design diagram: fetch posts from the WordPress API, clean the HTML, shrink the text with priority selection, ask the LLM, verify the evidence, and save to the master CSV" width="860">
+<img src="assets/PIPLEINE DESING_System Desing_Workflow_Architechture Diagram.jpg" alt="Pipeline design diagram: fetch posts from the WordPress API, clean the HTML, shrink the text with priority selection, ask the LLM, verify the evidence, and save to the master CSV" width="860">
 
 <!-- Asset note: this reference must match the exact file name in assets/ (shown truncated in Explorer). Run "dir assets" to confirm; fix this one link if your file name differs. -->
 
